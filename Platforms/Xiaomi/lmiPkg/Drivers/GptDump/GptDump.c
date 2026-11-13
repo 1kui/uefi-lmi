@@ -1,10 +1,13 @@
 /** @file
-  Print the GPT of every block device the firmware can see.
+  Print the GPT of every block device the firmware can see, then hold the
+  screen so it can be photographed.
 
   Bring-up aid for reading the handset's real partition geometry (the LS-1
   build has no adb, no root and fastboot does not expose partition offsets).
-  The output is held on screen for a few seconds so it can be photographed;
-  this driver is meant to be removed once the geometry is recorded.
+
+  This variant deliberately never returns: BDS changes the console mode right
+  after the driver dispatch finishes, which wipes everything printed above.
+  Staying here forever keeps the listing on screen until the phone is reset.
 
   SPDX-License-Identifier: BSD-2-Clause-Patent
 **/
@@ -50,8 +53,7 @@ STATIC CONST UINT64  GptSignature = 0x5452415020494645ULL;   /* "EFI PART" */
 
 STATIC
 VOID
-PrintDevice (
-  IN EFI_HANDLE             Handle,
+PrintOneDevice (
   IN EFI_BLOCK_IO_PROTOCOL  *BlockIo,
   IN UINTN                  Index
   )
@@ -62,22 +64,46 @@ PrintDevice (
   UINTN       EntryBytes;
   UINT32      Entry;
   UINTN       MediaId;
+  BOOLEAN     HasGpt;
 
   if ((BlockIo->Media == NULL) || !BlockIo->Media->MediaPresent) {
+    Print (L"[%u] no media\r\n", (UINT32)Index);
     return;
   }
+
+  Print (
+    L"[%u] block=%u last=%Lu  size=%Lu GiB\r\n",
+    (UINT32)Index,
+    BlockIo->Media->BlockSize,
+    BlockIo->Media->LastBlock,
+    DivU64x32 (
+      MultU64x32 (BlockIo->Media->LastBlock + 1, BlockIo->Media->BlockSize),
+      1024 * 1024 * 1024
+      )
+    );
 
   MediaId = BlockIo->Media->MediaId;
-  Status  = BlockIo->ReadBlocks (BlockIo, MediaId, 1, sizeof (Header), &Header);
-  if (EFI_ERROR (Status) || (Header.Signature != GptSignature)) {
+  HasGpt  = FALSE;
+  ZeroMem (&Header, sizeof (Header));
+
+  Status = BlockIo->ReadBlocks (BlockIo, MediaId, 1, sizeof (Header), &Header);
+  if (!EFI_ERROR (Status) && (Header.Signature == GptSignature)) {
+    HasGpt = TRUE;
+  }
+
+  if (!HasGpt) {
+    Print (L"    (no GPT at LBA 1)\r\n");
     return;
   }
 
-  Print (L"\r\n[%u] block=%u priv=%u start=%Lu last=%Lu entries@%Lu n=%u size=%u\r\n",
-         (UINT32)Index, BlockIo->Media->BlockSize, BlockIo->Media->LastBlock,
-         Header.FirstUsableLba, Header.LastUsableLba,
-         Header.PartitionEntryLba, Header.NumberOfPartitionEntries,
-         Header.SizeOfPartitionEntry);
+  Print (
+    L"    first_usable=%Lu last_usable=%Lu entries@%Lu n=%u size=%u\r\n",
+    Header.FirstUsableLba,
+    Header.LastUsableLba,
+    Header.PartitionEntryLba,
+    Header.NumberOfPartitionEntries,
+    Header.SizeOfPartitionEntry
+    );
 
   if ((Header.SizeOfPartitionEntry < sizeof (GPT_ENTRY)) ||
       (Header.NumberOfPartitionEntries == 0) ||
@@ -94,6 +120,7 @@ PrintDevice (
 
   Status = BlockIo->ReadBlocks (BlockIo, MediaId, Header.PartitionEntryLba, EntryBytes, Entries);
   if (EFI_ERROR (Status)) {
+    Print (L"    entry read failed 0x%x\r\n", Status);
     FreePool (Entries);
     return;
   }
@@ -102,6 +129,7 @@ PrintDevice (
     GPT_ENTRY  *Item = (GPT_ENTRY *)((UINT8 *)Entries + Entry * Header.SizeOfPartitionEntry);
     BOOLEAN    Zero  = TRUE;
     UINTN      Byte;
+    CHAR16     Name[37];
 
     for (Byte = 0; Byte < sizeof (EFI_GUID); Byte++) {
       if (((UINT8 *)&Item->PartitionTypeGuid)[Byte] != 0) {
@@ -114,17 +142,20 @@ PrintDevice (
       continue;
     }
 
-    {
-      CHAR16  Name[37];
+    CopyMem (Name, Item->PartitionName, sizeof (Item->PartitionName));
+    Name[36] = L'\0';
 
-      /* The name is UTF-16LE, NUL padded; copy with a guaranteed terminator. */
-      CopyMem (Name, Item->PartitionName, sizeof (Item->PartitionName));
-      Name[36] = L'\0';
-      Print (L"  %2u %s  lba %Lu..%Lu  (%Lu)\r\n",
-             (UINT32)(Entry + 1), Name,
-             Item->StartingLba, Item->EndingLba,
-             Item->EndingLba - Item->StartingLba + 1);
-    }
+    Print (
+      L"  %2u %s  %Lu..%Lu (%Lu MiB)\r\n",
+      (UINT32)(Entry + 1),
+      Name,
+      Item->StartingLba,
+      Item->EndingLba,
+      DivU64x32 (
+        MultU64x32 (Item->EndingLba - Item->StartingLba + 1, BlockIo->Media->BlockSize),
+        1024 * 1024
+        )
+      );
   }
 
   FreePool (Entries);
@@ -145,9 +176,10 @@ GptDumpEntry (
 
   Handles = NULL;
   Count   = 0;
-  /* UFSDxe publishes its block devices late, and the menu would cover this
-     output, so wait here for them instead of relying on a BlockIO depex. */
-  for (Attempt = 0; Attempt < 40; Attempt++) {
+
+  /* UFSDxe publishes its block device well after the APRIORI dispatch, so wait
+     for it rather than relying on a BlockIO depex. */
+  for (Attempt = 0; Attempt < 120; Attempt++) {
     Status = gBS->LocateHandleBuffer (
                     ByProtocol,
                     &gEfiBlockIoProtocolGuid,
@@ -167,43 +199,28 @@ GptDumpEntry (
     gBS->Stall (500 * 1000);
   }
 
+  Print (L"\r\n===== GPTDUMP =====\r\n");
+
   if ((Handles == NULL) || (Count == 0)) {
-    Print (L"\r\nGPTDUMP: no block devices after waiting\r\n");
-    gBS->Stall (15 * 1000 * 1000);
-    return EFI_SUCCESS;
-  }
+    Print (L"NO BLOCK DEVICES after 60s wait\r\n");
+  } else {
+    Print (L"%u block device(s)\r\n", (UINT32)Count);
+    for (Index = 0; Index < Count; Index++) {
+      EFI_BLOCK_IO_PROTOCOL  *BlockIo;
 
-  Print (L"\r\nGPTDUMP: %u block device(s)\r\n", (UINT32)Count);
-  for (Index = 0; Index < Count; Index++) {
-    EFI_BLOCK_IO_PROTOCOL  *BlockIo;
-
-    Status = gBS->HandleProtocol (Handles[Index], &gEfiBlockIoProtocolGuid, (VOID **)&BlockIo);
-    if (!EFI_ERROR (Status) && (BlockIo != NULL)) {
-      PrintDevice (Handles[Index], BlockIo, Index);
-    }
-  }
-
-  FreePool (Handles);
-  Print (L"\r\nGPTDUMP: done; press any key or wait two minutes\r\n");
-  /* Hold the output until a key is pressed or two minutes pass. */
-  {
-    EFI_INPUT_KEY  Key;
-    UINTN          Waited;
-
-    if (gST->ConIn != NULL) {
-      gST->ConIn->Reset (gST->ConIn, FALSE);
-    }
-
-    for (Waited = 0; Waited < 1200; Waited++) {
-      if ((gST->ConIn != NULL) &&
-          (gST->ConIn->ReadKeyStroke (gST->ConIn, &Key) == EFI_SUCCESS))
-      {
-        break;
+      Status = gBS->HandleProtocol (Handles[Index], &gEfiBlockIoProtocolGuid, (VOID **)&BlockIo);
+      if (!EFI_ERROR (Status) && (BlockIo != NULL)) {
+        PrintOneDevice (BlockIo, Index);
       }
-
-      gBS->Stall (100 * 1000);
     }
+
+    FreePool (Handles);
   }
 
-  return EFI_SUCCESS;
+  Print (L"===== END. screen held for 15 min =====\r\n");
+
+  /* Never return: BDS would reset the console mode and erase all of the above. */
+  for ( ; ; ) {
+    gBS->Stall (5 * 1000 * 1000);
+  }
 }
