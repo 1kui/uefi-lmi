@@ -82,14 +82,10 @@ READ_LOCK_STATUS   = TRUE
   !include Include/APRIORI.inc
 
   #
-  # UniXNU. These four must be in the FV before BdsDxe (which lives in DXE.inc)
-  # starts BDS: RamDiskDxe publishes the payload volume, UniXNUDxe registers the
-  # boot option, UniXNU is the menu, DarwinBoot is the XNU loader.
+  # Windows (WOA) bring-up variant: GptDump replaces the UniXNU chain so the
+  # firmware stops at a readable GPT listing instead of auto-booting XNU.
   #
-  INF UniXNUPkg/Driver/UniXNURamDiskDxe/UniXNURamDiskDxe.inf
-  INF UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.inf
-  INF UniXNUPkg/Application/UniXNU/UniXNU.inf
-  INF DarwinBootPkg/Driver/DarwinBoot.inf
+  INF lmiPkg/Drivers/GptDump/GptDump.inf
 
   !include Include/DXE.inc
   !include Include/RAW.inc

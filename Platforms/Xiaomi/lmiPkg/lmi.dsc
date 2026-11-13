@@ -87,12 +87,12 @@
   UniXNULib|UniXNUPkg/Library/UniXNULib/UniXNULib.inf
 
 #
-# UniXNU modules. The paths resolve through the firmware PACKAGES_PATH entries:
-# UniXNUPkg comes from the UniXNU build tree's package/, DarwinBootPkg from its
-# drivers/DarwinBoot. They are added on top of the KonaPkg/QcomPkg component list.
+# Windows (WOA) bring-up variant. The UniXNU menu and the XNU loader are not
+# needed to boot Windows, and their one-second auto-boot hides the BDS front
+# page and the bring-up output. They are replaced by GptDump, which prints the
+# real GPT of every block device the firmware can see: that both proves UFSDxe
+# enumerated the handset's LUN 0 and records the partition geometry this
+# 128 GB unit actually has.
 #
 [Components]
-  UniXNUPkg/Driver/UniXNURamDiskDxe/UniXNURamDiskDxe.inf
-  UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.inf
-  UniXNUPkg/Application/UniXNU/UniXNU.inf
-  DarwinBootPkg/Driver/DarwinBoot.inf
+  lmiPkg/Drivers/GptDump/GptDump.inf
